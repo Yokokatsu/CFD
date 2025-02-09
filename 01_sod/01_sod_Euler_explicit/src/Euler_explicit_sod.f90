@@ -13,7 +13,7 @@ module globals
     real(8), parameter :: dt    = 0.001d0
     real(8), parameter :: dx    = 0.01d0
     real(8), parameter :: gamma = 1.4d0
-    character(len=*), parameter :: dir_name = "./../result"
+    character(len=*), parameter :: dir_name = "./../result" ww
   
     ! グローバル変数（すべて 0-indexed とする）
     real(8), allocatable :: x(:)         ! 位置, サイズ: 0:nx-1
