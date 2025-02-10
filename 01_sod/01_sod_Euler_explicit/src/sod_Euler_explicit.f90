@@ -1,12 +1,13 @@
 !==============================================================
-! Fortran コード (fvs.f90)
-! Python コードの内容を忠実に再現した FVS 法による数値計算プログラム
+! shock tube Euler explicit 
+! 2025/02/10 Yokoyama Katsuyuki
 !==============================================================
 
 module globals
     implicit none
-    ! パラメータ定義
+    ! parameter
     integer, parameter :: nstep = 300
+    integer, parameter :: interval = 1
     integer, parameter :: nx0   = 100
     integer, parameter :: lpml  = 1
     integer, parameter :: nx    = nx0 + 2*lpml
@@ -15,18 +16,18 @@ module globals
     real(8), parameter :: gamma = 1.4d0
     character(len=*), parameter :: dir_name = "./../result"
   
-    ! グローバル変数（すべて 0-indexed とする）
-    real(8), allocatable :: x(:)         ! 位置, サイズ: 0:nx-1
-    real(8), allocatable :: bol(:)       ! 左端仮想セル（3成分）: 0:2
-    real(8), allocatable :: bor(:)       ! 右端仮想セル（3成分）: 0:2
-    real(8), allocatable :: qf(:,:)      ! 基本量 [u, ρ, p], サイズ: (0:nx-1,0:2)
-    real(8), allocatable :: Qc(:,:)      ! 保存量 [ρ, ρu, E], サイズ: (0:nx-1,0:2)
-    real(8), allocatable :: Res(:,:)     ! 残差（Flux 差分）, サイズ: (0:nx-1,0:2)
-    real(8), allocatable :: Fplus(:,:)   ! 境界フラックス, サイズ: (0:nx,0:2)
+    ! global variable
+    real(8), allocatable :: x(:)         ! 座標
+    real(8), allocatable :: bol(:)       ! 左側境界
+    real(8), allocatable :: bor(:)       ! 右側境界
+    real(8), allocatable :: qf(:,:)      ! 基本量 [u, ρ, p]
+    real(8), allocatable :: Qc(:,:)      ! 保存量 [ρ, ρu, E]
+    real(8), allocatable :: Res(:,:)     ! 対流項
+    real(8), allocatable :: Fplus(:,:)   ! 流束
     
   end module globals
   !--------------------------------------------------------------
-  ! メインプログラム
+  ! main loop
   !--------------------------------------------------------------
   program main
     use globals
@@ -34,20 +35,19 @@ module globals
     integer :: k
   
     !call cre_dir()   ! 出力フォルダの作成
-    call setup()     ! 初期値の設定
+    call setup()      ! 初期値の設定
   
     do k = 1, nstep
       write(*,*) "Time step:", k
       call cal_Q()             ! 保存量の更新
-      call Qctoqf()      ! 保存量から基本量へ変換
-      call output_q(k)  ! 結果の出力
+      call Qctoqf()            ! 保存量から基本量へ変換
+      call output_q(k)         ! 結果の出力
     end do
   
   end program main
 
   !--------------------------------------------------------------
-  ! サブルーチン cre_dir
-  ! 出力用フォルダの作成 (Unix 系 OS では "mkdir -p" コマンドを利用)
+  ! 出力用フォルダの作成 
   !--------------------------------------------------------------
   subroutine cre_dir()
     use globals
@@ -63,9 +63,7 @@ module globals
   end subroutine cre_dir
 
   !--------------------------------------------------------------
-  ! サブルーチン setup
-  ! 初期値の設定：セルごとに速度 u, 密度 ρ, 圧力 p, エネルギー E, 位置 x の初期化を行う
-  ! また、仮想境界セル bol, bor と基本量 qf、保存量 Qc を設定する
+  ! 初期値の設定
   !--------------------------------------------------------------
   subroutine setup()
     use globals
@@ -73,8 +71,7 @@ module globals
     integer :: i, j
     real(8), allocatable :: u(:), rho(:), p(:), e(:)
   
-    allocate(u(0:nx-1), rho(0:nx-1), p(0:nx-1), e(0:nx-1))
-    allocate(x(0:nx-1))
+    allocate(x(0:nx-1),u(0:nx-1), rho(0:nx-1), p(0:nx-1), e(0:nx-1))
   
     do i = 0, nx-1
       u(i) = 0.0d0
@@ -104,7 +101,6 @@ module globals
       end select
     end do
   
-    ! 基本量 qf と保存量 Qc の初期設定
     allocate(qf(0:nx-1,0:2), Qc(0:nx-1,0:2))
     do i = 0, nx-1
       ! qf: [u, ρ, p]
@@ -121,8 +117,7 @@ module globals
   end subroutine setup
 
   !--------------------------------------------------------------
-  ! サブルーチン cal_Q
-  ! 保存量 Qc を計算する。cal_Res により残差 Res を計算し、中央差分で更新後、境界条件を課す
+  ! 時間進行
   !--------------------------------------------------------------
   subroutine cal_Q()
     use globals
@@ -141,8 +136,7 @@ module globals
   end subroutine cal_Q
 
   !--------------------------------------------------------------
-  ! サブルーチン cal_Res
-  ! 境界フラックス Fplus を計算し、各セル i について Res(i,:) = Fplus(i,:) - Fplus(i-1,:) とする
+  ! 対流項の評価（風上差分）
   !--------------------------------------------------------------
   subroutine cal_Res()
     use globals
@@ -165,8 +159,7 @@ module globals
 
 
   !--------------------------------------------------------------
-  ! サブルーチン fvs
-  ! FVS 法により、各セル境界のフラックス Fplus を計算する
+  ! 境界の流束を評価（FVS）
   !--------------------------------------------------------------
   subroutine fvs()
     use globals
@@ -174,7 +167,7 @@ module globals
     integer :: i, j
     real(8) :: Ap(0:2,0:2), Am(0:2,0:2)
     real(8) :: R(0:2,0:2), R_inv(0:2,0:2), Gam(0:2,0:2), Gam_abs(0:2,0:2)
-    real(8) :: vec1(0:2), vec2(0:2)
+    real(8) :: QcL(0:2), QcR(0:2)
   
     if (.not. allocated(Fplus)) then
       allocate(Fplus(0:nx,0:2))
@@ -182,43 +175,42 @@ module globals
     Fplus = 0.0d0
   
     do i = 0, nx-2
-      ! i セル側の固有情報を計算
+      ! iセルにおけるR, R^-1,Λ,|Λ|
       call A_pm(i, R, R_inv, Gam, Gam_abs)
       Ap = matmul(R, matmul(Gam + Gam_abs, R_inv))
-      ! i+1 セル側の固有情報を計算
+      ! i+1セルにおけるR, R^-1,Λ,|Λ|
       call A_pm(i+1, R, R_inv, Gam, Gam_abs)
       Am = matmul(R, matmul(Gam - Gam_abs, R_inv))
-      ! それぞれのセルにおける保存量ベクトル Qc(i,:) と Qc(i+1,:) を用いてフラックスを計算
-      vec1 = Qc(i, :)
-      vec2 = Qc(i+1, :)
-      Fplus(i, :) = 0.5d0 * ( matmul(Ap, vec1) + matmul(Am, vec2) )
+      ! 境界フラックスを計算 A(+)*Q(j) + A(-)*Q(j+1)
+      QcL = Qc(i, :)
+      QcR = Qc(i+1, :)
+      Fplus(i, :) = 0.5d0 * ( matmul(Ap, QcL) + matmul(Am, QcR) )
     end do
   end subroutine fvs
 
   !--------------------------------------------------------------
-  ! サブルーチン A_pm
-  ! 指定セル ite において、ヤコビアンの固有値分解に必要な行列 R, R_inv, Gam, Gam_abs を計算する
+  ! ヤコビアン対角化行列の計算 R, R_inv, Gam, Gam_abs
   !--------------------------------------------------------------
   subroutine A_pm(ite, R, R_inv, Gam, Gam_abs)
     use globals
     implicit none
     integer, intent(in) :: ite
     real(8), intent(out) :: R(0:2,0:2), R_inv(0:2,0:2), Gam(0:2,0:2), Gam_abs(0:2,0:2)
-    real(8) :: H, u, c, b_para, a_para
+    real(8) :: h, u, c, b_para, a_para
   
-    ! エンタルピー H の計算： H = (E + p) / ρ  ※ E = Qc(:,2), p = qf(:,2)
+    ! エンタルピー h ： h = (E + p) / ρ  ※ e = Qc(:,2), p = qf(:,2)
     H = (Qc(ite,2) + qf(ite,2)) / Qc(ite,0)
     u = qf(ite,0)
-    c = sqrt((gamma - 1.0d0) * (H - 0.5d0*u*u))
+    c = sqrt((gamma - 1.0d0) * (h - 0.5d0*u*u))
     b_para = (gamma - 1.0d0) / (c*c)
     a_para = 0.5d0 * b_para * u*u
   
-    ! R 行列（各固有ベクトルを列に持つ）
+    ! 左固有ベクトル
     R(0,0) = 1.0d0;    R(0,1) = 1.0d0;     R(0,2) = 1.0d0
     R(1,0) = u - c;    R(1,1) = u;         R(1,2) = u + c
     R(2,0) = H - u*c;  R(2,1) = 0.5d0*u*u;   R(2,2) = H + u*c
   
-    ! 逆行列 R_inv の計算
+    ! 右固有ベクトル
     R_inv(0,0) = 0.5d0*(a_para + u/c)
     R_inv(0,1) = 0.5d0*(-b_para*u - 1.0d0/c)
     R_inv(0,2) = 0.5d0*b_para
@@ -243,8 +235,7 @@ module globals
   end subroutine A_pm
 
   !--------------------------------------------------------------
-  ! サブルーチン bound
-  ! 左端と右端の境界条件を設定する
+  ! 左端と右端の境界条件の設定
   !--------------------------------------------------------------
   subroutine bound()
     use globals
@@ -263,8 +254,7 @@ module globals
   end subroutine bound
 
   !--------------------------------------------------------------
-  ! サブルーチン qftoQc
-  ! 基本量 qf から保存量 Qc への変換 (本コード内では直接は使用していません)
+  ! 基本量qfから保存量Qcへの変換
   !--------------------------------------------------------------
   subroutine qftoQc()
     use globals
@@ -281,32 +271,27 @@ module globals
   end subroutine qftoQc
 
   !--------------------------------------------------------------
-! サブルーチン Qctoqf
-! 保存量 Qc から基本量 qf への変換 (本メインループで用いる)
-!--------------------------------------------------------------
-subroutine Qctoqf()
+  ! 保存量Qcから基本量qfへの変換
+  !--------------------------------------------------------------
+  subroutine Qctoqf()
     use globals
     implicit none
-    !real(8), intent(inout) :: qf(0:nx-1,0:2)
-    !real(8), intent(in) :: Qc(0:nx-1,0:2)
     integer :: i
     real(8) :: vel
   
     do i = 0, nx-1
-      ! 速度 u = ρu / ρ
+      ! u = ρu / ρ
       qf(i,0) = Qc(i,1) / Qc(i,0)
-      ! 密度 ρ
+      ! ρ
       qf(i,1) = Qc(i,0)
-      ! 圧力 p = (γ-1) [E - 1/2 ρ u^2]
+      ! p = (γ-1) [E - 1/2 ρ u^2]
       vel = Qc(i,1) / Qc(i,0)
       qf(i,2) = (gamma - 1.0d0) * (Qc(i,2) - 0.5d0 * Qc(i,0)*vel*vel)
     end do
   end subroutine Qctoqf
 
   !--------------------------------------------------------------
-  ! サブルーチン output_q
-  ! 基本量 qf と位置 x をテキスト形式で出力する
-  ! ファイル名は "timeXXXXd-3" (XXXX は 4 桁のゼロ埋め整数) とする
+  ! 結果の出力
   !--------------------------------------------------------------
   subroutine output_q(k)
     use globals
@@ -315,9 +300,7 @@ subroutine Qctoqf()
     character(len=100) :: filename, fullpath
     integer :: i, ios
     
-
-    !if (mod(k,10)==0)then
-      ! ファイル名の作成: "timeXXXXd-3"
+    if (mod(k,interval)==0)then
       write(filename, '(A,I4.4)') "sod_", k
       fullpath = trim(dir_name) // "/" // trim(filename) // ".dat"
   
@@ -332,5 +315,5 @@ subroutine Qctoqf()
         write(10, '(F10.5,1X,F10.5,1X,F10.5,1X,F10.5)') x(i), qf(i,0), qf(i,1), qf(i,2)
       end do
       close(10)
-    !end if
+    end if
   end subroutine output_q
