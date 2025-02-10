@@ -12,7 +12,7 @@ dt = 0.001
 
 do for [i=1:nsteps] {
     t = i * dt
-    set title sprintf("sod %04d", i)
+    set title sprintf("shock tube %04d", i)
     filename = sprintf("./../result/sod_%04d.dat", i)
     plot filename using 1:2 with lines lw 2 linecolor rgb "red" title "velocity u [m/s]", \
          filename using 1:3 with lines lw 2 linecolor rgb "blue" title "density ρ [kg/m³]", \
