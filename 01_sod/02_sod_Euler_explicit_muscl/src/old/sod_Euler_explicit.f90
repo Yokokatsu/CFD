@@ -14,11 +14,9 @@ module globals
     real(8), parameter :: dt    = 0.001d0
     real(8), parameter :: dx    = 0.01d0
     real(8), parameter :: gamma = 1.4d0
+    real(8), parameter :: k_muscl = 1.0/3.0
+    real(8), parameter :: b_muscl = (3.0 - k_muscl) / (1.0 - k_muscl)
     character(len=*), parameter :: dir_name = "./../result"
-    
-    !MUSCL parameter
-    real, parameter :: k_muscl = 1.0/3.0
-    real, parameter :: b_muscl = (3.0 - k_muscl) / (1.0 - k_muscl)
   
     ! global variable
     real(8), allocatable :: x(:)         ! 座標
@@ -28,8 +26,10 @@ module globals
     real(8), allocatable :: Qc(:,:)      ! 保存量 [ρ, ρu, E]
     real(8), allocatable :: Res(:,:)     ! 対流項
     real(8), allocatable :: Fplus(:,:)   ! 流束
-    real(8), allocatable :: qfL(:,:), qfR(:,:), QcL(:,:), QcR(:,:)      !
-    
+
+    real(8), allocatable :: Qc_np(:,:)      ! 保存量 [ρ, ρu, E]
+    !real(8), allocatable :: QcL(:,:), QcR(:,:), qfL(:,:), qfR(:,:)
+    real(8) :: QcL(0:nx-1,0:2), QcR(0:nx-1,0:2), qfL(0:nx-1,0:2), qfR(0:nx-1,0:2)
   end module globals
   !--------------------------------------------------------------
   ! main loop
@@ -45,7 +45,7 @@ module globals
     do k = 1, nstep
       write(*,*) "Time step:", k
       call cal_Q()             ! 保存量の更新
-      call Qctoqf()            ! 保存量から基本量へ変換
+      call Qctoqf(Qc, qf)            ! 保存量から基本量へ変換
       call output_q(k)         ! 結果の出力
     end do
   
@@ -107,7 +107,6 @@ module globals
     end do
   
     allocate(qf(0:nx-1,0:2), Qc(0:nx-1,0:2))
-    allocate(qfR(0:nx-1,0:2), qfL(0:nx-1,0:2), QcR(0:nx-1,0:2), QcL(0:nx-1,0:2))
     do i = 0, nx-1
       ! qf: [u, ρ, p]
       qf(i,0) = u(i)
@@ -129,20 +128,19 @@ module globals
     use globals
     implicit none
     integer :: i, j
-    real, dimension(0:nx-1,0:2) :: Qc_np
   
     call cal_Res()
-    Qc_np = Qc
+  
     do i = 1, nx-2
       do j = 0, 2
         Qc(i,j) = Qc(i,j) - dt/dx * Res(i,j)
       end do
     end do
-    call cal_Res()
+    Qc_np = Qc
     do i = 1, nx-2
-       do j = 0, 2
-          Qc(i,j) = 0.5*( Qc_np(i,j) + Qc(i,j) - (dt/dx)*Res(i,j) )
-       end do
+      do j = 0, 2
+        Qc(i,j) = 0.5*(Qc_np(i,j)+Qc(i,j) - dt/dx * Res(i,j))
+      end do
     end do
   
     call bound()
@@ -180,8 +178,11 @@ module globals
     integer :: i, j
     real(8) :: Ap(0:2,0:2), Am(0:2,0:2)
     real(8) :: R(0:2,0:2), R_inv(0:2,0:2), Gam(0:2,0:2), Gam_abs(0:2,0:2)
-    !real(8) :: QcL(0:2), QcR(0:2), qfL(0:2), qfR(0:2)
+    !real(8) :: QcL(0:2), QcR(0:2)
   
+    if (.not. allocated(Fplus)) then
+      allocate(Fplus(0:nx,0:2))
+    end if
     if (.not. allocated(Fplus)) then
       allocate(Fplus(0:nx,0:2))
     end if
@@ -199,9 +200,91 @@ module globals
       ! 境界フラックスを計算 A(+)*Q(j) + A(-)*Q(j+1)
       !QcL(i, :) = Qc(i, :)
       !QcR(i, :) = Qc(i+1, :)
-      Fplus(i, :) = 0.5d0 * ( matmul(Ap, QcL(i, :)) + matmul(Am, QcR(i, :)) )
+      Fplus(i, :) = 0.5d0 * ( matmul(Ap, QcL(i,:)) + matmul(Am, QcR(i,:)) ) 
     end do
   end subroutine fvs
+
+  !----------------------------------------------------------------
+  ! サブルーチン muscl : MUSCL法による流束の評価
+  !----------------------------------------------------------------
+  subroutine muscl()
+    use globals
+    implicit none
+    integer :: i, j
+    real :: dplus, dminus, dplus_jp, dminus_jp, minmod
+
+    call Qctoqf(Qc, qf)
+
+    ! n0-MUSCL
+    !do i = 0, nx
+      !do j = 0, 2
+         !QcL(i, :) = Qc(i, :)
+         !QcR(i, :) = Qc(i+1, :)
+      !end do
+    !end do
+
+    ! qfL, qfR を 0 初期化
+    do i = 0, nx-1
+       do j = 0, 2
+          qfL(i,j) = 0.0
+          qfR(i,j) = 0.0
+       end do
+    end do
+
+    do i = 1, nx-3
+       do j = 0, 2
+          dplus      = qf(i+1,j) - qf(i,j)
+          dminus     = qf(i,j)   - qf(i-1,j)
+          dplus_jp   = qf(i+2,j) - qf(i+1,j)
+          dminus_jp  = qf(i+1,j) - qf(i,j)
+          qfL(i,j) = qf(i,j) + 0.25 * ( (1.0 - k_muscl)*minmod(dminus, dplus, b_muscl) &
+                                       +(1.0 + k_muscl)*minmod(dplus, dminus, b_muscl) )
+          qfR(i,j) = qf(i+1,j) - 0.25 * ( (1.0 - k_muscl)*minmod(dplus_jp, dminus_jp, b_muscl) &
+                                         +(1.0 + k_muscl)*minmod(dminus_jp, dplus_jp, b_muscl) )
+       end do
+    end do
+
+    ! 境界内側用
+    do j = 0, 2
+       dplus_jp  = qf(2,j) - qf(1,j)
+       dminus_jp = qf(1,j) - qf(0,j)
+       qfR(0,j) = qf(1,j) - 0.25 * ( (1.0 - k_muscl)*minmod(dplus_jp, dminus_jp, b_muscl) &
+                                    +(1.0 + k_muscl)*minmod(dminus_jp, dplus_jp, b_muscl) )
+    end do
+
+    do j = 0, 2
+       dplus  = qf(nx-1,j) - qf(nx-2,j)
+       dminus = qf(nx-2,j) - qf(nx-3,j)
+       qfL(nx-2,j) = qf(nx-2,j) + 0.25 * ( (1.0 - k_muscl)*minmod(dminus, dplus, b_muscl) &
+                                          +(1.0 + k_muscl)*minmod(dplus, dminus, b_muscl) )
+    end do
+
+    ! qfL, qfR から保存量 QcL, QcR へ変換
+    call qftoQc(qfL, QcL)
+    call qftoQc(qfR, QcR)
+
+    ! 境界外側（風上）の設定
+    do j = 0, 2
+       qfL(0,j)      = qf(0,j)
+       QcL(0,j)      = Qc(0,j)
+       qfR(nx-2,j)   = qf(nx-1,j)
+       QcR(nx-2,j)   = Qc(nx-1,j)
+    end do
+
+  end subroutine muscl
+
+  !----------------------------------------------------------------
+  ! 関数 minmod : スロープリミッタ（minmod 型）
+  !----------------------------------------------------------------
+  real function minmod(x, y, b)
+    implicit none
+    real, intent(in) :: x, y, b
+    if ( x == 0.0 ) then
+       minmod = 0.0
+    else
+      minmod = sign(1.0, x)*max(0.0, min(abs(x), sign(1.0, x)*y*b))
+    end if
+  end function minmod
 
   !--------------------------------------------------------------
   ! ヤコビアン対角化行列の計算 R, R_inv, Gam, Gam_abs
@@ -249,82 +332,8 @@ module globals
     Gam_abs(2,2) = abs(u + c)
   end subroutine A_pm
 
-   !----------------------------------------------------------------
-  ! サブルーチン muscl : MUSCL法による再構成
-  !----------------------------------------------------------------
-  subroutine muscl()
-    use globals
-    implicit none
-    integer :: i, j
-    real :: dplus, dminus, dplus_jp, dminus_jp, minmod
-
-    call Qctoqf()
-
-    ! qfL, qfR を 0 初期化
-    do i = 0, nx
-       do j = 0, 2
-          qfL(i,j) = 0.0
-          qfR(i,j) = 0.0
-       end do
-    end do
-
-    do i = 1, nx-3
-       do j = 0, 2
-          dplus      = qf(i+1,j) - qf(i,j)
-          dminus     = qf(i,j)   - qf(i-1,j)
-          dplus_jp   = qf(i+2,j) - qf(i+1,j)
-          dminus_jp  = qf(i+1,j) - qf(i,j)
-          qfL(i,j) = qf(i,j) + 0.25 * ( (1.0 - k_muscl)*minmod(dminus, dplus, b_muscl) + &
-                                        (1.0 + k_muscl)*minmod(dplus, dminus, b_muscl) )
-          qfR(i,j) = qf(i+1,j) - 0.25 * ( (1.0 - k_muscl)*minmod(dplus_jp, dminus_jp, b_muscl) + &
-                                          (1.0 + k_muscl)*minmod(dminus_jp, dplus_jp, b_muscl) )               
-       end do
-    end do
-
-    ! 境界内側用
-    do j = 0, 2
-       dplus_jp  = qf(2,j) - qf(1,j)
-       dminus_jp = qf(1,j) - qf(0,j)
-       qfR(0,j) = qf(1,j) - 0.25 * ( (1.0 - k_muscl)*minmod(dplus_jp, dminus_jp, b_muscl) + &
-                                     (1.0 + k_muscl)*minmod(dminus_jp, dplus_jp, b_muscl) )
-    end do
-
-    do j = 0, 2
-       dplus  = qf(nx-1,j) - qf(nx-2,j)
-       dminus = qf(nx-2,j) - qf(nx-3,j)
-       qfL(nx-2,j) = qf(nx-2,j) + 0.25 * ( (1.0 - k_muscl)*minmod(dminus, dplus, b_muscl) + &
-                                           (1.0 + k_muscl)*minmod(dplus, dminus, b_muscl) )
-    end do
-
-    ! qfL, qfR から保存量 QcL, QcR へ変換
-    call qftoQc(qfL, QcL)
-    call qftoQc(qfR, QcR)
-
-    ! 境界外側（風上）の設定
-    do j = 0, 2
-       qfL(0,j)      = qf(0,j)
-       QcL(0,j)      = Qc(0,j)
-       qfR(nx-2,j)   = qf(nx-1,j)
-       QcR(nx-2,j)   = Qc(nx-1,j)
-    end do
-
-  end subroutine muscl
-
-  !----------------------------------------------------------------
-  ! 関数 minmod : スロープリミッタ（minmod 型）
-  !----------------------------------------------------------------
-  real function minmod(x, y, b)
-    implicit none
-    real, intent(in) :: x, y, b
-    if ( x == 0.0 ) then
-       minmod = 0.0
-    else
-      minmod = sign(1.0, x)*max(0.0, min(abs(x), sign(1.0, x)*y*b))
-    end if
-  end function minmod
-
   !--------------------------------------------------------------
-  ! 左端と右端の境界条件の設定
+  ! 境界条件の設定
   !--------------------------------------------------------------
   subroutine bound()
     use globals
@@ -342,40 +351,46 @@ module globals
     end do
   end subroutine bound
 
-  !--------------------------------------------------------------
+
+  !----------------------------------------------------------------
   ! 基本量qfから保存量Qcへの変換
-  !--------------------------------------------------------------
+  !----------------------------------------------------------------
   subroutine qftoQc(qf_in, Qc_out)
     use globals
     implicit none
-    real(8), intent(in) :: qf_in(0:nx-1,0:2)
-    real(8), intent(out) :: Qc_out(0:nx-1,0:2)
+    real, intent(in)  :: qf_in(0:nx-1,0:2)
+    real, intent(out) :: Qc_out(0:nx-1,0:2)
     integer :: i
-  
     do i = 0, nx-1
-      Qc_out(i,0) = qf_in(i,1)
-      Qc_out(i,1) = qf_in(i,1) * qf_in(i,0)
-      Qc_out(i,2) = qf_in(i,2)/(gamma-1.0d0) + 0.5d0*qf_in(i,1)*qf_in(i,0)**2
+       Qc_out(i,0) = qf_in(i,1)
+       Qc_out(i,1) = qf_in(i,1) * qf_in(i,0)
+       Qc_out(i,2) = qf_in(i,2)/(gamma-1.0) + 0.5*qf_in(i,1)*qf_in(i,0)**2
     end do
   end subroutine qftoQc
 
-  !--------------------------------------------------------------
+  !----------------------------------------------------------------
   ! 保存量Qcから基本量qfへの変換
-  !--------------------------------------------------------------
-  subroutine Qctoqf()
+  !----------------------------------------------------------------
+  subroutine Qctoqf(Qc_in, qf_out)
     use globals
     implicit none
+    real, intent(in)  :: Qc_in(0:nx-1,0:2)
+    real, intent(out) :: qf_out(0:nx-1,0:2)
     integer :: i
-    real(8) :: vel
-  
-    do i = 0, nx-1
-      ! u = ρu / ρ
-      qf(i,0) = Qc(i,1) / Qc(i,0)
-      ! ρ
-      qf(i,1) = Qc(i,0)
-      ! p = (γ-1) [E - 1/2 ρ u^2]
-      vel = Qc(i,1) / Qc(i,0)
-      qf(i,2) = (gamma - 1.0d0) * (Qc(i,2) - 0.5d0 * Qc(i,0)*vel*vel)
+    real :: vel
+    do i = 1, nx- 1
+       if ( Qc_in(i,0) /= 0.0 ) then
+          qf_out(i,0) = Qc_in(i,1) / Qc_in(i,0)
+       else
+          qf_out(i,0) = 0.0
+       end if
+       qf_out(i,1) = Qc_in(i,0)
+       if ( Qc_in(i,0) /= 0.0 ) then
+          vel = Qc_in(i,1)/Qc_in(i,0)
+       else
+          vel = 0.0
+       end if
+       qf_out(i,2) = (gamma-1.0)*(Qc_in(i,2) - 0.5*Qc_in(i,0)*vel**2)
     end do
   end subroutine Qctoqf
 
